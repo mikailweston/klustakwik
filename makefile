@@ -3,9 +3,10 @@
 # KlustaKwik for backwards compatibility
 
 PROGRAM = KlustaKwik
-OBJS = io.o linalg.o log.o parameters.o precomputations.o util.o klustakwik.o
+OBJS = io.o linalg.o log.o parameters.o precomputations.o util.o memorytracking.o klustakwik.o
 CC = g++
 DEBUG = -g
+PROFILE = -pg
 OPTIMISATIONS = -O3 -ffast-math
 CFLAGS = -Wall -c -Wno-write-strings $(OPTIMISATIONS)
 LFLAGS = -Wall
@@ -16,6 +17,12 @@ all: executable
 debug: CFLAGS += $(DEBUG)
 debug: LFLAGS += $(DEBUG)
 debug: executable
+
+# Adds profiling flags
+profile: OPTIMISATIONS += -march=native
+profile: CFLAGS += $(PROFILE)
+profile: LFLAGS += $(PROFILE)
+profile: executable
 
 # Adds -march=native to optimisations, which only works for recent gcc versions
 native: OPTIMISATIONS += -march=native
@@ -32,10 +39,11 @@ clean:
 ######## DEPENDENCIES FOR FILES IN PROJECT ###################################
 
 linalg.h: numerics.h
-klustakwik.h: parameters.h log.h util.h numerics.h linalg.h
+klustakwik.h: parameters.h log.h util.h numerics.h linalg.h memorytracking.h
 numerics.h: globalswitches.h
 parameters.h: numerics.h
 util.h: numerics.h
+memorytracking.h: numerics.h
 
 io.o: io.cpp klustakwik.h
 	$(CC) $(CFLAGS) $<
@@ -56,4 +64,7 @@ precomputations.o: precomputations.cpp klustakwik.h
 	$(CC) $(CFLAGS) $<
 
 util.o: util.cpp util.h
+	$(CC) $(CFLAGS) $<
+
+memorytracking.o: memorytracking.cpp memorytracking.h
 	$(CC) $(CFLAGS) $<
