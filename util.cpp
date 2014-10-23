@@ -14,6 +14,7 @@
 #include<stdlib.h>
 #include<stdarg.h>
 #include "numerics.h"
+#include<math.h>
 
 const scalar HugeScore = (scalar)1e32;
 
@@ -47,4 +48,31 @@ void MatPrint(FILE *fp, scalar *Mat, integer nRows, integer nCols) {
         fprintf(fp, "\n");
         Output("\n");
     }
+}
+
+void CompareVectors(scalar *A, scalar *B, integer N)
+{
+	scalar meanerr = 0.0;
+	scalar maxerr = 0.0;
+	integer nerr = 0;
+	integer ntotal = 0;
+	for (integer i = 0; i < N; i++)
+	{
+		scalar err = fabs(A[i] - B[i]);
+		ntotal++;
+		if (err > 0)
+		{
+			nerr++;
+			meanerr += err;
+			if (err > maxerr)
+				maxerr = err;
+		}
+	}
+	if (nerr)
+	{
+		meanerr /= nerr;
+		cout << "Comparison error n=" << nerr << " (" << (100.0*nerr) / ntotal << "%), mean=" << meanerr << ", max=" << maxerr << endl;
+	}
+	else
+		cout << "No comparison error." << endl;
 }

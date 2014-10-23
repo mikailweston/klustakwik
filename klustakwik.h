@@ -31,9 +31,12 @@ public:
             scalar PenaltyK, scalar PenaltyKLogN, integer PriorPoint);
     // Construct from subset of existing KK object
     void ConstructFrom(const KK &Source, const vector<integer> &Indices);
+	void ConstructFrom(const KK &Source);
     KK(const KK &Source, const vector<integer> &Indices);
     // Make an entire copy of existing KK object
     KK(const KK &Source);
+	// Destructor
+	~KK();
     /////////////// FUNCTIONS //////////////////////////////////////////////////
 	void MemoryCheck();
 	integer NumBytesRequired();
@@ -77,6 +80,7 @@ public:
     void SaveCovMeans();
 public:
     /////////////// VARIABLES //////////////////////////////////////////////////
+	KK *KK_split, *K2_container; // used for splitting
     integer nDims, nDims2; // nDims2 is nDims squared and the mean of the unmasked dimensions.
     int nStartingClusters; // total # starting clusters, including clu 0, the noise cluster (int because read in from file)
     integer nClustersAlive; // nClustersAlive is total number with points in, excluding noise cluster
@@ -118,6 +122,7 @@ public:
     vector<scalar> Mean; // Mean[c*nDims + d] = cluster mean for cluster c in dimension d
     vector<scalar> Cov; // Cov[c*nDims*nDims + i*nDims + j] = Covariance for cluster C, entry i,j
                     // NB covariances are stored in upper triangle (j>=i)
+	vector<BlockPlusDiagonalMatrix> DynamicCov; // Covariance matrices, DynamicCov[cc] where cc is alive cluster index
     vector<scalar> LogP; // LogP[p*MaxClusters + c] = minus log likelihood for point p in cluster c
     vector<integer> Class; // Class[p] = best cluster for point p
     vector<integer> OldClass; // Class[p] = previous cluster for point p
@@ -127,7 +132,7 @@ public:
     vector<integer> AliveIndex; // a list of the alive classes to iterate over
 
     // Used for distributional optimisations
-    vector<bool> ClusterMask;
+    vector<scalar> ClusterMask;
     vector< vector<integer> > ClusterUnmaskedFeatures;
     vector< vector<integer> > ClusterMaskedFeatures;
 
@@ -143,6 +148,7 @@ public:
     vector<scalar> ClassPenalty;
     // debugging info
     integer numiterations;
+	integer init_type;
 	// memory tracking
 	KKMemoryRequest mem;
 };

@@ -36,6 +36,10 @@ void KK::MemoryCheck()
 
 integer KK::NumBytesRequired()
 {
+	// we don't allocate any memory if we have already allocated memory to this
+	// (i.e. if we are in TrySplits)
+	if (Data.size())
+		return 0;
 	nDims2 = nDims*nDims;
 	// Compute required memory and check if it exceeds the limit set
 	integer num_bytes_allocated =
@@ -45,7 +49,7 @@ integer KK::NumBytesRequired()
 		sizeof(scalar)*nPoints +                     // UnMaskDims
 		sizeof(scalar)*MaxPossibleClusters +         // Weight
 		sizeof(scalar)*MaxPossibleClusters*nDims +   // Mean
-		sizeof(scalar)*MaxPossibleClusters*nDims2 +  // Cov
+		(1 - UseDistributional)*sizeof(scalar)*MaxPossibleClusters*nDims2 + // Cov
 		sizeof(scalar)*MaxPossibleClusters*nPoints + // LogP
 		sizeof(integer)*nPoints +                    // Class
 		sizeof(integer)*nPoints +                    // OldClass
@@ -58,10 +62,30 @@ integer KK::NumBytesRequired()
 		sizeof(scalar)*nPoints*nDims +               // AllVector2Mean
 		// UseDistributional only
 		UseDistributional*sizeof(scalar)*MaxPossibleClusters +  // CorrectionTerm
-		(UseDistributional*MaxPossibleClusters*nDims)/8 +       // ClusterMask (vector<bool>)
+		sizeof(scalar)*(UseDistributional*MaxPossibleClusters*nDims) + // ClusterMask (vector<scalar>)
 		UseDistributional*sizeof(integer)*MaxPossibleClusters*nDims; // ClusterUnmaskedFeatures + ClusterMaskedFeatures
 
 	return num_bytes_allocated;
+}
+
+template<class T>
+inline void resize_and_fill_with_zeros(vector<T> &x, integer newsize)
+{
+	if (x.size() == 0)
+	{
+		x.resize((uinteger)newsize);
+		return;
+	}
+	if (x.size() > (uinteger)newsize)
+	{
+		fill(x.begin(), x.end(), (T)0);
+		x.resize((uinteger)newsize);
+	}
+	else
+	{
+		x.resize((uinteger)newsize);
+		fill(x.begin(), x.end(), (T)0);
+	}
 }
 
 // Sets storage for KK class.  Needs to have nDims and nPoints defined
@@ -74,27 +98,28 @@ void KK::AllocateArrays() {
 	mem.add(num_bytes_allocated);
 
     // Set sizes for arrays
-    Data.resize(nPoints * nDims);
+	resize_and_fill_with_zeros(Data, nPoints * nDims);
     //SNK
-    Masks.resize(nPoints * nDims);
-    FloatMasks.resize(nPoints * nDims);
-    UnMaskDims.resize(nPoints); //SNK Number of unmasked dimensions for each data point when using float masks $\sum m_i$
-    Weight.resize(MaxPossibleClusters);
-    Mean.resize(MaxPossibleClusters*nDims);
-    Cov.resize(MaxPossibleClusters*nDims2);
-    LogP.resize(MaxPossibleClusters*nPoints);
-    Class.resize(nPoints);
-    OldClass.resize(nPoints);
-    Class2.resize(nPoints);
-    BestClass.resize(nPoints);
-    ClassAlive.resize(MaxPossibleClusters);
-    AliveIndex.resize(MaxPossibleClusters);
-    ClassPenalty.resize(MaxPossibleClusters);
-    nClassMembers.resize(MaxPossibleClusters);
+	resize_and_fill_with_zeros(Masks, nPoints * nDims);
+	resize_and_fill_with_zeros(FloatMasks, nPoints * nDims);
+	resize_and_fill_with_zeros(UnMaskDims, nPoints); //SNK Number of unmasked dimensions for each data point when using float masks $\sum m_i$
+	resize_and_fill_with_zeros(Weight, MaxPossibleClusters);
+	resize_and_fill_with_zeros(Mean, MaxPossibleClusters*nDims);
+	if (!UseDistributional)
+		resize_and_fill_with_zeros(Cov, MaxPossibleClusters*nDims2);
+	resize_and_fill_with_zeros(LogP, MaxPossibleClusters*nPoints);
+	resize_and_fill_with_zeros(Class, nPoints);
+	resize_and_fill_with_zeros(OldClass, nPoints);
+	resize_and_fill_with_zeros(Class2, nPoints);
+	resize_and_fill_with_zeros(BestClass, nPoints);
+	resize_and_fill_with_zeros(ClassAlive, MaxPossibleClusters);
+	resize_and_fill_with_zeros(AliveIndex, MaxPossibleClusters);
+	resize_and_fill_with_zeros(ClassPenalty, MaxPossibleClusters);
+	resize_and_fill_with_zeros(nClassMembers, MaxPossibleClusters);
     if(UseDistributional)
     {
-        CorrectionTerm.resize(nPoints * nDims);
-        ClusterMask.resize(MaxPossibleClusters*nDims);
+		resize_and_fill_with_zeros(CorrectionTerm, nPoints * nDims);
+		resize_and_fill_with_zeros(ClusterMask, MaxPossibleClusters*nDims);
     }
 }
 
@@ -178,7 +203,7 @@ void KK::ComputeClusterMasks()
 
 	// Initialise cluster mask to 0
 	for(integer i=0; i<nDims*MaxPossibleClusters; i++)
-		ClusterMask[i] = false;
+		ClusterMask[i] = 0;
 
 	// Compute cluster mask
     for(integer p=0; p<nPoints; p++)
@@ -186,8 +211,7 @@ void KK::ComputeClusterMasks()
         integer c = Class[p];
 		for (integer i = 0; i < nDims; i++)
 		{
-			if (FloatMasks[p*nDims + i]>0)
-				ClusterMask[c*nDims + i] = true;
+			ClusterMask[c*nDims + i] += FloatMasks[p*nDims + i];
 		}
     }
 
@@ -206,10 +230,16 @@ void KK::ComputeClusterMasks()
 		vector<integer> &CurrentMasked = ClusterMaskedFeatures[c];
 		for (integer i = 0; i < nDims; i++)
 		{
-			if (ClusterMask[c*nDims + i] == true)
+			if (ClusterMask[c*nDims + i]>=PointsForClusterMask)
 				CurrentUnmasked.push_back(i);
 			else
 				CurrentMasked.push_back(i);
+		}
+		if (Verbose>=2)
+		{
+			Output("Cluster mask: cluster %d unmasked %d iterations %d/%d init type %d.\n",
+				(int)cc, (int)CurrentUnmasked.size(),
+				(int)numiterations, (int)global_numiterations, (int)init_type);
 		}
 	}
 
@@ -226,14 +256,12 @@ void KK::MStep()
     // clear arrays
     memset((void*)&nClassMembers.front(), 0, MaxPossibleClusters*sizeof(integer));
     memset((void*)&Mean.front(), 0, MaxPossibleClusters*nDims*sizeof(scalar));
-    memset((void*)&Cov.front(), 0, MaxPossibleClusters*nDims*nDims*sizeof(scalar));
+	if (!UseDistributional)
+		memset((void*)&Cov.front(), 0, MaxPossibleClusters*nDims2*sizeof(scalar));
 // NOTE: memset commands above replace the code below:
 //    for(c=0; c<MaxPossibleClusters; c++) {
 //        nClassMembers[c] = 0;
 //        for(i=0; i<nDims; i++) Mean[c*nDims + i] = 0;
-//        for(i=0; i<nDims; i++) for(j=i; j<nDims; j++) {
-//            Cov[c*nDims2 + i*nDims + j] = 0;
-//        }
 //    }
 
     if (Debug) { Output("Entering Unmasked Mstep \n");}
@@ -363,12 +391,61 @@ void KK::MStep()
 	{
 		// Compute the cluster masks, used below to optimise the computation
 		ComputeClusterMasks();
+		// Empty the dynamic covariance matrices (we will fill it up as we go)
+		DynamicCov.clear();
 
 		for (cc = 0; cc<nClustersAlive; cc++)
 		{
 			c = AliveIndex[cc];
 			vector<integer> &PointsInThisClass = PointsInClass[c];
 			vector<integer> &CurrentUnmasked = ClusterUnmaskedFeatures[c];
+			vector<integer> &CurrentMasked = ClusterMaskedFeatures[c];
+			DynamicCov.push_back(BlockPlusDiagonalMatrix(CurrentMasked, CurrentUnmasked));
+			BlockPlusDiagonalMatrix &CurrentCov = DynamicCov.back();
+			if (CurrentUnmasked.size() == 0)
+				continue;
+
+			//// Correct version for dynamic cov matrix
+			//for (integer q = 0; q < (integer)PointsInThisClass.size(); q++)
+			//{
+			//	p = PointsInThisClass[q];
+			//	for (integer ii = 0; ii < (integer)CurrentUnmasked.size(); ii++)
+			//	{
+			//		i = CurrentUnmasked[ii];
+			//		for (integer jj = 0; jj < (integer)CurrentUnmasked.size(); jj++)
+			//		{
+			//			j = CurrentUnmasked[jj];
+			//			//Cov[c*nDims2 + i*nDims + j] += AllVector2Mean[p*nDims + i] * AllVector2Mean[p*nDims + j];
+			//			CurrentCov.Block[ii*CurrentCov.NumUnmasked + jj] += AllVector2Mean[p*nDims + i] * AllVector2Mean[p*nDims + j];
+			//		}
+			//	}
+			//}
+			// Fast version for dynamic cov matrix
+			const integer npoints = (integer)PointsInThisClass.size();
+			const integer nunmasked = (integer)CurrentUnmasked.size();
+			if (npoints > 0 && nunmasked > 0)
+			{
+				const integer * __restrict pitc = &(PointsInThisClass[0]);
+				const integer * __restrict cu = &(CurrentUnmasked[0]);
+				for (integer q = 0; q < npoints; q++)
+				{
+					const integer p = pitc[q];
+					const scalar * __restrict av2mp = &(AllVector2Mean[p*nDims]);
+					for (integer ii = 0; ii < nunmasked; ii++)
+					{
+						const integer i = cu[ii];
+						const scalar av2mp_i = av2mp[i];
+						scalar * __restrict row = &(CurrentCov.Block[ii*nunmasked]);
+						for (integer jj = 0; jj < nunmasked; jj++)
+						{
+							const integer j = cu[jj];
+							//Cov[c*nDims2 + i*nDims + j] += AllVector2Mean[p*nDims + i] * AllVector2Mean[p*nDims + j];
+							row[jj] += av2mp_i * av2mp[j];
+						}
+					}
+				}
+			}
+
 			// Correct version
 			//for (integer q = 0; q < (integer)PointsInThisClass.size(); q++)
 			//{
@@ -387,6 +464,7 @@ void KK::MStep()
 			// Doesn't make any use of cache structure, but no need to upgrade now because
 			// we will move to a sparse block matrix structure that will make this more
 			// natural
+			/*
 			const integer * __restrict cu = &(CurrentUnmasked[0]);
 			const integer ncu = (integer)CurrentUnmasked.size();
 			scalar * __restrict cov_c = &(Cov[c*nDims2]);
@@ -410,7 +488,7 @@ void KK::MStep()
 					}
 				}
 			}
-
+			*/
 		}
 	}
 	else
@@ -456,54 +534,70 @@ void KK::MStep()
         {
             c = AliveIndex[cc];
             vector<integer> &PointsInThisClass = PointsInClass[c];
-            for(i=0; i<nDims; i++)
-            {
-                scalar ccf = 0.0; // class correction factor
-                for(integer q=0; q<(integer)PointsInThisClass.size(); q++)
-                {
-                    p = PointsInThisClass[q];
-                    ccf += CorrectionTerm[p*nDims+i];
-                }
-                //Output("Class %d Class correction factor[%d] = %f \n",(int)c,(int)i,ccf);
-                Cov[c*nDims2+i*nDims+i] += ccf;
-            //    Output("Class %d Covariance diagonal[%d] = %f \n",(int)c,(int)i,Cov[c*nDims2+i*nDims+i] );
-            }
-        }
+			integer NumPointsInThisClass = PointsInThisClass.size();
+			BlockPlusDiagonalMatrix &CurrentCov = DynamicCov[cc];
+			for (integer ii = 0; ii<CurrentCov.NumUnmasked; ii++)
+			{
+				i = (*CurrentCov.Unmasked)[ii];
+				scalar ccf = 0.0; // class correction factor
+				for (integer q = 0; q<NumPointsInThisClass; q++)
+				{
+					p = PointsInThisClass[q];
+					ccf += CorrectionTerm[p*nDims + i];
+				}
+				CurrentCov.Block[ii*CurrentCov.NumUnmasked + ii] += ccf;
+			}
+			for (integer ii = 0; ii<CurrentCov.NumMasked; ii++)
+			{
+				i = (*CurrentCov.Masked)[ii];
+				scalar ccf = 0.0; // class correction factor
+				for (integer q = 0; q<NumPointsInThisClass; q++)
+				{
+					p = PointsInThisClass[q];
+					ccf += CorrectionTerm[p*nDims + i];
+				}
+				CurrentCov.Diagonal[ii] += ccf;
+			}
+		}
 
     // Add a diagonal matrix of Noise variances to the covariance matrix for renormalization
-        for (cc=0; cc<nClustersAlive; cc++)
+		for (cc = 0; cc < nClustersAlive; cc++)
 		{
-        	c = AliveIndex[cc];
-			for (i=0; i<nDims; i++)
-			{
-				//Output("Class %d: PriorPoint*NoiseVariance[%d] = %f",c,i,priorPoint*NoiseVariance[i]);
-				Cov[c*nDims2+i*nDims+i] += priorPoint*NoiseVariance[i];
-			}
+			c = AliveIndex[cc];
+			BlockPlusDiagonalMatrix &CurrentCov = DynamicCov[cc];
+			for (integer ii = 0; ii < CurrentCov.NumUnmasked; ii++)
+				CurrentCov.Block[ii*CurrentCov.NumUnmasked + ii] += priorPoint*NoiseVariance[(*CurrentCov.Unmasked)[ii]];
+			for (integer ii = 0; ii < CurrentCov.NumMasked; ii++)
+				CurrentCov.Diagonal[ii] += priorPoint*NoiseVariance[(*CurrentCov.Masked)[ii]];
 		}
 
 
     }
 
     // and normalize
-    if(UseDistributional){
-                for (cc=0; cc<nClustersAlive; cc++)
-                {
-                    c = AliveIndex[cc];
-                    for(i=0; i<nDims; i++)
-                        for(j=i; j<nDims; j++)
-                            Cov[c*nDims2 + i*nDims + j] /= (nClassMembers[c]+priorPoint-1);
-                }
-
-        }
-    else {    //For original KlustaKwik classical EM
+    if(UseDistributional)
+	{
         for (cc=0; cc<nClustersAlive; cc++)
-                        {
-                            c = AliveIndex[cc];
-                            for(i=0; i<nDims; i++)
-                                for(j=i; j<nDims; j++)
-                                    Cov[c*nDims2 + i*nDims + j] /= (nClassMembers[c]-1);
-                        }
+        {
+            c = AliveIndex[cc];
+			BlockPlusDiagonalMatrix &CurrentCov = DynamicCov[cc];
+			scalar factor = 1.0 / (nClassMembers[c] + priorPoint - 1);
+			for (i = 0; i < (integer)CurrentCov.Block.size(); i++)
+				CurrentCov.Block[i] *= factor;
+			for (i = 0; i < (integer)CurrentCov.Diagonal.size(); i++)
+				CurrentCov.Diagonal[i] *= factor;
+		}
 
+    }
+    else
+	{    //For original KlustaKwik classical EM
+        for (cc=0; cc<nClustersAlive; cc++)
+        {
+            c = AliveIndex[cc];
+            for(i=0; i<nDims; i++)
+                for(j=i; j<nDims; j++)
+                    Cov[c*nDims2 + i*nDims + j] /= (nClassMembers[c]-1);
+        }
     }
 
 
@@ -518,8 +612,11 @@ void KK::MStep()
 			Output("Class %d - Weight %.2g\n", (int)c, Weight[c]);
             Output("Mean: ");
             MatPrint(stdout, &Mean.front() + c*nDims, 1, nDims);
-            Output("\nCov:\n");
-            MatPrint(stdout, &Cov.front() + c*nDims2, nDims, nDims);
+			if (!UseDistributional)
+			{
+				Output("\nCov:\n");
+				MatPrint(stdout, &Cov.front() + c*nDims2, nDims, nDims);
+			}
             Output("\n");
         }
     }
@@ -537,7 +634,8 @@ void KK::EStep()
     scalar LogRootDet; // log of square root of covariance determinant
     scalar Mahal; // Mahalanobis distance of point from cluster center
     scalar correction_factor = (scalar)1; // for partial correction in distributional step
-    vector<scalar> Chol(nDims2); // to store choleski decomposition
+	scalar InverseClusterNorm;
+	vector<scalar> Chol(nDims2); // to store choleski decomposition
     vector<scalar> Vec2Mean(nDims); // stores data point minus class mean
     vector<scalar> Root(nDims); // stores result of Chol*Root = Vec
     vector<scalar> InvCovDiag;
@@ -563,17 +661,47 @@ void KK::EStep()
         NumberInClass[ccc]++;
     }
 
-    for(cc=1; cc<nClustersAlive; cc++)
+	BlockPlusDiagonalMatrix *CurrentCov;
+	BlockPlusDiagonalMatrix *CholBPD = NULL;
+
+	for (cc = 1; cc<nClustersAlive; cc++)
     {
         c = AliveIndex[cc];
 
         // calculate cholesky decomposition for class c
-        SafeArray<scalar> safeCov(Cov, c*nDims2, "safeCov");
 		integer chol_return;
 		if (UseDistributional)
-			chol_return = MaskedCholesky(safeCov, safeChol, nDims, ClusterMaskedFeatures[c], ClusterUnmaskedFeatures[c]);
+		{
+			CurrentCov = &(DynamicCov[cc]);
+			if (CholBPD)
+			{
+				delete CholBPD;
+				CholBPD = NULL;
+			}
+			CholBPD = new BlockPlusDiagonalMatrix(*(CurrentCov->Masked), *(CurrentCov->Unmasked));
+			chol_return = BPDCholesky(*CurrentCov, *CholBPD);
+			//if (MinMaskOverlap>0)
+			//{
+			//	// compute the norm of the cluster mask (used for skipping points)
+			//	const scalar * __restrict cm = &(ClusterMask[c*nDims]);
+			//	scalar ClusterNorm = 0.0;
+			//	for (i = 0; i < nDims; i++)
+			//	{
+			//		scalar m = cm[i];
+			//		//if (m > ClusterNorm)
+			//		//	ClusterNorm = m;
+			//		ClusterNorm += m*m;
+			//	}
+			//	//InverseClusterNorm = 1.0 / ClusterNorm;
+			//	InverseClusterNorm = 1.0 / sqrt(ClusterNorm);
+			//	//InverseClusterNorm = sqrt((scalar)nDims) / sqrt(ClusterNorm);
+			//}
+		}
 		else
+		{
+			SafeArray<scalar> safeCov(Cov, c*nDims2, "safeCov");
 			chol_return = Cholesky(safeCov, safeChol, nDims);
+		}
         if(chol_return)
         {
             // If Cholesky returns 1, it means the matrix is not positive definite.
@@ -585,9 +713,20 @@ void KK::EStep()
         }
 
         // LogRootDet is given by log of product of diagonal elements
-        LogRootDet = 0;
-        for(i=0; i<nDims; i++)
-            LogRootDet += (float)log(Chol[i*nDims + i]);
+		if (UseDistributional)
+		{
+			LogRootDet = 0;
+			for (integer ii = 0; ii < CholBPD->NumUnmasked; ii++)
+				LogRootDet += log(CholBPD->Block[ii*CholBPD->NumUnmasked + ii]);
+			for (integer ii = 0; ii < CholBPD->NumMasked; ii++)
+				LogRootDet += log(CholBPD->Diagonal[ii]);
+		}
+		else
+		{
+			LogRootDet = 0;
+			for (i = 0; i < nDims; i++)
+				LogRootDet += log(Chol[i*nDims + i]);
+		}
 
         // if distributional E step, compute diagonal of inverse of cov matrix
         if(UseDistributional)
@@ -600,7 +739,7 @@ void KK::EStep()
             {  
 				safeBasisVector[i] = (scalar)1;
                 // calculate Root vector - by Chol*Root = BasisVector
-				MaskedTriSolve(safeChol, safeBasisVector, safeRoot, nDims, ClusterMaskedFeatures[c], ClusterUnmaskedFeatures[c]);
+				BPDTriSolve(*CholBPD, safeBasisVector, safeRoot);
                 // add half of Root vector squared to log p
                 scalar Sii = (scalar)0;
                 for(integer j=0; j<nDims; j++)
@@ -623,45 +762,82 @@ void KK::EStep()
                 continue;
             }
 
+			// to save time, skip points with mask overlap below threshold
+			if (MinMaskOverlap > 0)
+			{
+				// compute dot product of point mask with cluster mask
+				const scalar * __restrict PointMask = &(FloatMasks[p*nDims]);
+				const scalar * __restrict cm = &(ClusterMask[c*nDims]);
+				scalar dotprod = 0.0;
+				//// InverseClusterNorm is computed above, uncomment it if you uncomment any of this
+				//for (i = 0; i < nDims; i++)
+				//{
+				//	dotprod += cm[i] * PointMask[i] * InverseClusterNorm;
+				//	if (dotprod >= MinMaskOverlap)
+				//		break;
+				//}
+				const integer NumUnmasked = CurrentCov->NumUnmasked;
+				if (NumUnmasked)
+				{
+					const integer * __restrict cu = &((*(CurrentCov->Unmasked))[0]);
+					for (integer ii = 0; ii < NumUnmasked; ii++)
+					{
+						const integer i = cu[ii];
+						dotprod += PointMask[i];
+						if (dotprod >= MinMaskOverlap)
+							break;
+					}
+				}
+				//dotprod *= InverseClusterNorm;
+				if (dotprod < MinMaskOverlap)
+				{
+					nSkipped++;
+					continue;
+				}
+			}
+
             // Compute Mahalanobis distance
             Mahal = 0;
 
-            // calculate data minus class mean
-            for(i=0; i<nDims; i++)
-                Vec2Mean[i] = Data[p*nDims + i] - Mean[c*nDims + i];
+			// calculate data minus class mean
+			//for (i = 0; i<nDims; i++)
+			//	Vec2Mean[i] = Data[p*nDims + i] - Mean[c*nDims + i];
+			scalar * __restrict Data_p = &(Data[p*nDims]);
+			scalar * __restrict Mean_c = &(Mean[c*nDims]);
+			scalar * __restrict v2m = &(Vec2Mean[0]);
+			for (i = 0; i < nDims; i++)
+				v2m[i] = Data_p[i] - Mean_c[i];
 
             // calculate Root vector - by Chol*Root = Vec2Mean
 			if (UseDistributional)
-				MaskedTriSolve(safeChol, safeVec2Mean, safeRoot, nDims, ClusterMaskedFeatures[c], ClusterUnmaskedFeatures[c]);
+				BPDTriSolve(*CholBPD, safeVec2Mean, safeRoot);
 			else
 				TriSolve(safeChol, safeVec2Mean, safeRoot, nDims);
 
             // add half of Root vector squared to log p
             for(i=0; i<nDims; i++)
                 Mahal += Root[i]*Root[i];
-    //        if(Debug)Output("Mahal = %f",Mahal);
 
             // if distributional E step, add correction term
-            if(UseDistributional)
-                for(i=0; i<nDims; i++)
-                {
-                    //if(UseDistributionalEStep==2)      // Distribution E-Step 2 "semi-Bayesian", no longer used, code retained here in case
-                    //    correction_factor = ClassCorrectionFactor[c*nDims+i]+
-                    //            (1.0-2.0/(scalar)nClassMembers[c]);
-                    Mahal += correction_factor*CorrectionTerm[p*nDims+i]*safeInvCovDiag[i];
-        //                                if(Debug) {Output("CorrectionTerm[%d*nDims+%d] = %f ",(int)p,(int)i,CorrectionTerm[p*nDims+i]);
-        //               Output("Mahal = %f",Mahal);}
-                }
-
+			if (UseDistributional)
+			{
+				scalar * __restrict ctp = &(CorrectionTerm[p*nDims]);
+				scalar * __restrict icd = &(InvCovDiag[0]);
+				scalar subMahal = 0.0;
+				for (i = 0; i < nDims; i++)
+					subMahal += ctp[i] * icd[i];
+				Mahal += subMahal*correction_factor;
+			}
             // Score is given by Mahal/2 + log RootDet - log weight
             LogP[p*MaxPossibleClusters + c] = Mahal/2
                                        + LogRootDet
                                     - log(Weight[c])
-                                    + (float)log(2*M_PI)*nDims/2;
-                                          //           Output("LogP = %f ",LogP[p*MaxPossibleClusters + c]);
+									+ (0.5*log(2 * M_PI))*nDims;
 
         } // for(p=0; p<nPoints; p++)
     } // for(cc=1; cc<nClustersAlive; cc++)
+	if (CholBPD)
+		delete CholBPD;
 }
 
 
@@ -841,7 +1017,28 @@ integer KK::TrySplits()
     }
 
     // set up K3 and remember to add the masks
-    KK K3(*this);
+    //KK K3(*this);
+	if (!AlwaysSplitBimodal)
+	{
+		if (KK_split == NULL)
+		{
+			KK_split = new KK(*this);
+		}
+		else
+		{
+			// We have to clear these to bypass the debugging checks
+			// in precomputations.cpp
+			KK_split->Unmasked.clear();
+			KK_split->UnmaskedInd.clear();
+			KK_split->SortedMaskChange.clear();
+			KK_split->SortedIndices.clear();
+			// now we treat it as empty
+			KK_split->ConstructFrom(*this);
+		}
+	}
+	//KK &K3 = *KK_split;
+#define K3 (*KK_split)
+
     Output("Compute initial score before splitting: ");
     Score = ComputeScore();
 
@@ -858,7 +1055,25 @@ integer KK::TrySplits()
                 SubsetIndices.push_back(p);
         if(SubsetIndices.size()==0)
             continue;
-        KK K2(*this, SubsetIndices);
+
+		if (K2_container)
+		{
+			// We have to clear these to bypass the debugging checks
+			// in precomputations.cpp
+			K2_container->Unmasked.clear();
+			K2_container->UnmaskedInd.clear();
+			K2_container->SortedMaskChange.clear();
+			K2_container->SortedIndices.clear();
+			//K2_container->AllVector2Mean.clear();
+			// now we treat it as empty
+			K2_container->ConstructFrom(*this, SubsetIndices);
+		}
+		else
+		{
+			K2_container = new KK(*this, SubsetIndices);
+		}
+        //KK K2(*this, SubsetIndices);
+		KK &K2 = *K2_container;
 
         // find an unused cluster
         UnusedCluster = -1;
@@ -887,49 +1102,71 @@ integer KK::TrySplits()
         // if(SplitScore<UnsplitScore) {
         if(K2.nClustersAlive<2) Output("\n Split failed - leaving alone\n");
         if((SplitScore<UnsplitScore)&&(K2.nClustersAlive>=2)) {
-            // will splitting improve the score in the whole data set?
+			if (AlwaysSplitBimodal)
+			{
+				DidSplit = 1;
+				Output("\n We are always splitting bimodal clusters so it's getting split into cluster %d.\n", (int)UnusedCluster);
+				p2 = 0;
+				for (p = 0; p < nPoints; p++)
+				{
+					if (Class[p] == c)
+					{
+						if (K2.Class[p2] == 1) Class[p] = c;
+						else if (K2.Class[p2] == 2) Class[p] = UnusedCluster;
+						else Error("split should only produce 2 clusters\n");
+						p2++;
+					}
+					ClassAlive[Class[p]] = 1;
+				}
+			}
+			else
+			{
+				// will splitting improve the score in the whole data set?
 
-            // assign clusters to K3
-            for(c2=0; c2<MaxPossibleClusters; c2++) K3.ClassAlive[c2]=0;
-         //   Output("%d Points in class %d in KKobject K3 ", (int)c2, (int)K3.nClassMembers[c2]);
-            p2 = 0;
-            for(p=0; p<nPoints; p++)
-            {
-                if(Class[p]==c)
-                {
-                    if(K2.Class[p2]==1) K3.Class[p] = c;
-                    else if(K2.Class[p2]==2) K3.Class[p] = UnusedCluster;
-                    else Error("split should only produce 2 clusters\n");
-                    p2++;
-                }
-                else K3.Class[p] = Class[p];
-                K3.ClassAlive[K3.Class[p]] = 1;
-            }
-            K3.Reindex();
+				// assign clusters to K3
+				for (c2 = 0; c2 < MaxPossibleClusters; c2++) K3.ClassAlive[c2] = 0;
+				//   Output("%d Points in class %d in KKobject K3 ", (int)c2, (int)K3.nClassMembers[c2]);
+				p2 = 0;
+				for (p = 0; p < nPoints; p++)
+				{
+					if (Class[p] == c)
+					{
+						if (K2.Class[p2] == 1) K3.Class[p] = c;
+						else if (K2.Class[p2] == 2) K3.Class[p] = UnusedCluster;
+						else Error("split should only produce 2 clusters\n");
+						p2++;
+					}
+					else K3.Class[p] = Class[p];
+					K3.ClassAlive[K3.Class[p]] = 1;
+				}
+				K3.Reindex();
 
-            // compute scores
+				// compute scores
 
-            K3.MStep();
-            K3.EStep();
-            //Output("About to compute K3 class penalties");
-            if (UseDistributional) K3.ComputeClassPenalties(); //SNK Fixed bug: Need to compute the cluster penalty properly, cluster penalty is only used in UseDistributional mode
-            NewScore = K3.ComputeScore();
-			Output("\nSplitting cluster %d changes total score from " SCALARFMT " to " SCALARFMT "\n", (int)c, Score, NewScore);
+				K3.MStep();
+				K3.EStep();
+				//Output("About to compute K3 class penalties");
+				if (UseDistributional) K3.ComputeClassPenalties(); //SNK Fixed bug: Need to compute the cluster penalty properly, cluster penalty is only used in UseDistributional mode
+				NewScore = K3.ComputeScore();
+				Output("\nSplitting cluster %d changes total score from " SCALARFMT " to " SCALARFMT "\n", (int)c, Score, NewScore);
 
-            if (NewScore<Score)
-            {
-                DidSplit = 1;
-				Output("\n So it's getting split into cluster %d.\n", (int)UnusedCluster);
-                // so put clusters from K3 back into main KK struct (K1)
-                for(c2=0; c2<MaxPossibleClusters; c2++) ClassAlive[c2] = K3.ClassAlive[c2];
-                for(p=0; p<nPoints; p++) Class[p] = K3.Class[p];
-            } else
-            {
-                Output("\n So it's not getting split.\n");
-            }
+				if (NewScore < Score)
+				{
+					DidSplit = 1;
+					Output("\n So it's getting split into cluster %d.\n", (int)UnusedCluster);
+					// so put clusters from K3 back into main KK struct (K1)
+					for (c2 = 0; c2 < MaxPossibleClusters; c2++) ClassAlive[c2] = K3.ClassAlive[c2];
+					for (p = 0; p < nPoints; p++) Class[p] = K3.Class[p];
+				}
+				else
+				{
+					Output("\n So it's not getting split.\n");
+				}
+			}
         }
     }
-    return DidSplit;
+	return DidSplit;
+#undef K3
 }
 
 // ComputeScore() - computes total score.  Requires M, E, and C steps to have been run
@@ -951,7 +1188,7 @@ scalar KK::ComputeScore()
         // Output("point %d: cumulative score " SCALARFMT " adding" SCALARFMT "\n", (int)p, Score, debugadd);
     }
     //Error("Score: " SCALARFMT " Penalty: " SCALARFMT "\n", Score, penalty);
-    Output("Score: Raw " SCALARFMT " + Penalty " SCALARFMT " = " SCALARFMT, Score-penalty, penalty, Score);
+    Output("  Score: Raw " SCALARFMT " + Penalty " SCALARFMT " = " SCALARFMT "\n", Score-penalty, penalty, Score);
 
     if (Debug) {
         integer c, cc;
@@ -1175,7 +1412,7 @@ scalar KK::CEM(char *CluFile, integer Recurse, integer InitRand,
         {
             if(Recurse==0) Output("\t\tSP:");
             if ((Recurse!=0)||(SplitInfo==1&&Recurse==0))
-                Output("Iteration %d%c (" SCALARFMT " sec): %d clusters ",
+                Output("Iteration %d%c (" SCALARFMT " sec): %d clusters\n",
 				       (int)Iter, FullStep ? 'F' : 'Q', timesofar, (int)nClustersAlive);
         }
         
@@ -1186,7 +1423,7 @@ scalar KK::CEM(char *CluFile, integer Recurse, integer InitRand,
         //Finish output to klg file with Score already returned via the ComputeScore() function
         if(Verbose>=1)
         {
-			Output(" nChanged %d\n", (int)nChanged);
+			Output("  nChanged %d\n", (int)nChanged);
         }
 
         //if(Verbose>=1)
@@ -1281,6 +1518,7 @@ scalar KK::Cluster(char *StartCluFile=NULL)
     Weight = KKSub.Weight;
     Mean = KKSub.Mean;
     Cov = KKSub.Cov;
+	DynamicCov = KKSub.DynamicCov;
     ClassAlive = KKSub.ClassAlive;
     nClustersAlive = KKSub.nClustersAlive;
     AliveIndex = KKSub.AliveIndex;
@@ -1300,6 +1538,8 @@ scalar KK::Cluster(char *StartCluFile=NULL)
 KK::KK(char *FileBase, integer ElecNo, char *UseFeatures,
         scalar PenaltyK, scalar PenaltyKLogN, integer PriorPoint)
 {
+	KK_split = NULL;
+	K2_container = NULL;
     penaltyK = PenaltyK;
     penaltyKLogN = PenaltyKLogN;
     LoadData(FileBase, ElecNo, UseFeatures);
@@ -1309,13 +1549,15 @@ KK::KK(char *FileBase, integer ElecNo, char *UseFeatures,
     
     DoInitialPrecomputations();//Now DoPrecomputations is only invoked in the initialization
     numiterations = 0;
+	init_type = 0;
 }
 
 // This function is used by both of the constructors below, it initialises
 // the data from a source KK object with a subset of the indices.
 void KK::ConstructFrom(const KK &Source, const vector<integer> &Indices)
 {
-    
+	KK_split = NULL;
+	K2_container = NULL;
     nDims = Source.nDims;
     nDims2 = nDims*nDims;
     nPoints = Indices.size();
@@ -1323,6 +1565,10 @@ void KK::ConstructFrom(const KK &Source, const vector<integer> &Indices)
     penaltyKLogN = Source.penaltyKLogN;
     priorPoint = Source.priorPoint;
     nStartingClusters = Source.nStartingClusters;
+	NoisePoint = Source.NoisePoint;
+	FullStep = Source.FullStep;
+	nClustersAlive = Source.nClustersAlive;
+	numiterations = Source.numiterations;
     AllocateArrays(); // Set storage for all the arrays such as Data, FloatMasks, Weight, Mean, Cov, etc.
 
     if (Debug)
@@ -1377,18 +1623,33 @@ void KK::ConstructFrom(const KK &Source, const vector<integer> &Indices)
     numiterations = 0;
 }
 
+void KK::ConstructFrom(const KK &Source)
+{
+	vector<integer> Indices(Source.nPoints);
+	for (integer i = 0; i<Source.nPoints; i++)
+		Indices[i] = i;
+	ConstructFrom(Source, Indices);
+}
+
 KK::KK(const KK &Source, const vector<integer> &Indices)
 {
     ConstructFrom(Source, Indices);
+	init_type = 2;
 }
 
 // If we don't specify an index subset, use everything.
 KK::KK(const KK &Source)
 {
-    vector<integer> Indices(Source.nPoints);
-    for(integer i=0; i<Source.nPoints; i++)
-        Indices[i] = i;
-    ConstructFrom(Source, Indices);
+	ConstructFrom(Source);
+	init_type = 1;
+}
+
+KK::~KK()
+{
+	if (KK_split) delete KK_split;
+	KK_split = NULL;
+	if (K2_container) delete K2_container;
+	K2_container = NULL;
 }
 
 // Main loop
